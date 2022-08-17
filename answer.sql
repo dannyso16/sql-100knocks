@@ -1423,6 +1423,35 @@ WHERE (gender_cd = '0' AND row# < @N * @rate_male)
 なお、外れ値は売上金額合計を対数化したうえで平均と標準偏差を計算し、その平均から3σを超えて離れたものとする
 （自然対数と常用対数のどちらでも可）。結果は10件表示せよ。
 */
+DROP TABLE IF EXISTS #1
+SELECT 
+	customer_id
+	,SUM(amount) AS sum_amount
+INTO #1
+FROM receipt WITH(NOLOCK)
+--WHERE customer_id NOT LIKE 'Z%'
+GROUP BY customer_id
+
+--平均と標準偏差　計算
+DECLARE @avg float
+DECLARE @std float
+
+SELECT
+	@avg = AVG(LOG(sum_amount))
+	,@std = STDEVP(LOG(sum_amount))
+FROM #1
+SELECT @avg, @std
+
+--外れ値出力
+SELECT 
+	customer_id
+	,sum_amount
+	--,LOG(sum_amount) AS log_sum_amount
+	--,@avg - 3 * @std AS avg_minus_3sigma
+	--,@avg + 3 * @std AS avg_plos_3sigma
+FROM #1
+WHERE LOG(sum_amount) < @avg - 3*@std
+	OR @avg + 3*@std < LOG(sum_amount)
 
 /*
 > S-078: レシート明細データ（receipt）の売上金額（amount）を顧客単位に合計し、合計した売上金額の外れ値を抽出せよ。
@@ -1431,15 +1460,68 @@ WHERE (gender_cd = '0' AND row# < @N * @rate_male)
 または「第3四分位数+1.5×IQR」を超えるものとする。結果は10件表示せよ。
 */
 
+DROP TABLE IF EXISTS #1
+SELECT 
+	customer_id
+	,SUM(amount) AS sum_amount
+INTO #1
+FROM receipt WITH(NOLOCK)
+WHERE customer_id NOT LIKE 'Z%'
+GROUP BY customer_id
+
+--IQR 計算
+DECLARE @p1 float
+DECLARE @p3 float
+DECLARE @iqr float
+
+SELECT TOP 1
+	@p1 = PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY sum_amount) OVER() 
+	,@p3 = PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY sum_amount) OVER()
+FROM #1
+
+SET @iqr = @p3 - @p1
+
+--外れ値出力
+SELECT 
+	customer_id
+	,sum_amount
+	,@p1 - 1.5*@iqr
+	,@p3 + 1.5*@iqr
+FROM #1
+WHERE sum_amount < @p1 - 1.5*@iqr
+	OR @p3 + 1.5*@iqr < sum_amount
+
 /*
 > S-079: 商品データ（product）の各項目に対し、欠損数を確認せよ。
 */
+SELECT
+	 COUNT(CASE WHEN product_cd         IS NULL THEN 1 ELSE NULL END) AS cnt_null_product_cd
+	,COUNT(CASE WHEN category_major_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmac
+	,COUNT(CASE WHEN category_medium_cd IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmec
+	,COUNT(CASE WHEN category_small_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_csc
+	,COUNT(CASE WHEN unit_price         IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_price
+	,COUNT(CASE WHEN unit_cost          IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_cost
+FROM product WITH(NOLOCK)
+
 
 /*
 > S-080: 商品データ（product）のいずれかの項目に欠損が発生しているレコードを全て削除した新たな商品データを作成せよ。
 
 なお、削除前後の件数を表示させ、079で確認した件数だけ減少していることも確認すること。
 */
+SELECT COUNT(*) FROM product --10030
+
+DROP TABLE IF EXISTS #product_0null
+SELECT *
+INTO #product_0null
+FROM product WITH(NOLOCK)
+WHERE product_cd          IS NOT NULL
+	AND category_major_cd  IS NOT NULL
+	AND category_medium_cd IS NOT NULL
+	AND category_small_cd  IS NOT NULL
+	AND unit_price         IS NOT NULL
+	AND unit_cost          IS NOT NULL
+
 
 /*
 
