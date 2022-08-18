@@ -1524,5 +1524,319 @@ WHERE product_cd          IS NOT NULL
 
 
 /*
+> S-081: 単価（unit_price）と原価（unit_cost）の欠損値について、
+それぞれの平均値で補完した新たな商品データを作成せよ。
+なお、平均値については1円未満を丸めること（四捨五入または偶数への丸めで良い）。
+補完実施後、各項目について欠損が生じていないことも確認すること。
+*/
 
+DECLARE @avg_unit_price int
+DECLARE @avg_unit_cost int
+
+SELECT
+	@avg_unit_price = AVG(unit_price)
+	,@avg_unit_cost = AVG(unit_cost)
+FROM product
+
+DROP TABLE IF EXISTS #product2
+SELECT
+	product_cd
+	,category_major_cd
+	,category_medium_cd
+	,category_small_cd
+	,COALESCE(unit_price, @avg_unit_price) AS unit_price
+	,COALESCE(unit_cost, @avg_unit_cost) AS unit_cost
+INTO #product2
+FROM product 
+SELECT * FROM #product2
+
+--NULLがないことを確認
+SELECT
+	 COUNT(CASE WHEN product_cd         IS NULL THEN 1 ELSE NULL END) AS cnt_null_product_cd
+	,COUNT(CASE WHEN category_major_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmac
+	,COUNT(CASE WHEN category_medium_cd IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmec
+	,COUNT(CASE WHEN category_small_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_csc
+	,COUNT(CASE WHEN unit_price         IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_price
+	,COUNT(CASE WHEN unit_cost          IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_cost
+FROM #product2
+
+
+/*
+> S-082: 単価（unit_price）と原価（unit_cost）の欠損値について、
+それぞれの中央値で補完した新たな商品データを作成せよ。
+なお、中央値については1円未満を丸めること（四捨五入または偶数への丸めで良い）。
+補完実施後、各項目について欠損が生じていないことも確認すること。
+*/
+
+DECLARE @median_unit_price int
+DECLARE @median_unit_cost int
+
+SELECT
+	@median_unit_price = PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY unit_price) OVER() 
+	,@median_unit_cost = PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY unit_cost) OVER()
+FROM product
+
+DROP TABLE IF EXISTS #product2
+SELECT
+	product_cd
+	,category_major_cd
+	,category_medium_cd
+	,category_small_cd
+	,COALESCE(unit_price, @median_unit_price) AS unit_price
+	,COALESCE(unit_cost, @median_unit_cost) AS unit_cost
+INTO #product2
+FROM product 
+SELECT * FROM #product2
+
+--NULLがないことを確認
+SELECT
+	 COUNT(CASE WHEN product_cd         IS NULL THEN 1 ELSE NULL END) AS cnt_null_product_cd
+	,COUNT(CASE WHEN category_major_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmac
+	,COUNT(CASE WHEN category_medium_cd IS NULL THEN 1 ELSE NULL END) AS cnt_null_cmec
+	,COUNT(CASE WHEN category_small_cd  IS NULL THEN 1 ELSE NULL END) AS cnt_null_csc
+	,COUNT(CASE WHEN unit_price         IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_price
+	,COUNT(CASE WHEN unit_cost          IS NULL THEN 1 ELSE NULL END) AS cnt_null_unit_cost
+FROM #product2
+
+/*
+> S-083: 単価（unit_price）と原価（unit_cost）の欠損値について、
+各商品のカテゴリ小区分コード（category_small_cd）ごとに算出した中央値で補完した新たな商品データを作成せよ。
+なお、中央値については1円未満を丸めること（四捨五入または偶数への丸めで良い）。
+補完実施後、各項目について欠損が生じていないことも確認すること。
+*/
+
+WITH MEDIAN AS (
+	SELECT
+		product_cd
+		,category_small_cd
+		,PERCENTILE_CONT(0.5)
+			WITHIN GROUP (ORDER BY unit_price)
+			OVER(PARTITION BY category_small_cd) AS median_unit_price
+		,PERCENTILE_CONT(0.5) 
+			WITHIN GROUP (ORDER BY unit_cost) 
+			OVER(PARTITION BY category_small_cd) AS median_unit_cost
+	FROM product
+)
+SELECT
+	product.product_cd
+	,product.category_major_cd
+	,product.category_medium_cd
+	,product.category_small_cd
+	,COALESCE(product.unit_price, MEDIAN.median_unit_price) AS unit_price
+	,COALESCE(product.unit_cost, MEDIAN.median_unit_cost) AS unit_cost
+FROM product
+LEFT JOIN MEDIAN
+	ON MEDIAN.product_cd = product.product_cd
+
+
+/*
+> S-084: 顧客データ（customer）の全顧客に対して
+全期間の売上金額に占める2019年売上金額の割合を計算し、新たなデータを作成せよ。
+ただし、売上実績がない場合は0として扱うこと。そして計算した割合が0超のものを抽出し、
+結果を10件表示せよ。また、作成したデータに欠損が存在しないことを確認せよ。
+*/
+WITH R19 AS (
+	SELECT
+		customer_id
+		,SUM(amount) AS sum_amount
+	FROM receipt
+	WHERE sales_ymd LIKE '2019%'
+	GROUP BY customer_id
+)
+,RAll AS (
+	SELECT
+		customer_id
+		,SUM(amount) AS sum_amount
+	FROM receipt
+	GROUP BY customer_id
+)
+SELECT
+	RAll.customer_id
+	,COALESCE(
+		R19.sum_amount / RAll.sum_amount * 100
+		,0) AS rate_all_vs_19
+FROM RAll
+LEFT JOIN R19
+ON RAll.customer_id = R19.customer_id
+
+/*
+> S-085: 顧客データ（customer）の全顧客に対し、
+郵便番号（postal_cd）を用いてジオコードデータ（geocode）を紐付け、
+新たな顧客データを作成せよ。ただし、1つの郵便番号（postal_cd）に
+複数の経度（longitude）、緯度（latitude）情報が紐づく場合は、
+経度（longitude）、緯度（latitude）の平均値を算出して使用すること。
+また、作成結果を確認するために結果を10件表示せよ。
+*/
+WITH G AS (
+	SELECT
+		postal_cd
+		,AVG(longitude) AS longitude
+		,AVG(latitude) AS latitude
+	FROM geocode
+	GROUP BY postal_cd
+)
+SELECT
+	customer.*
+	,G.longitude
+	,G.latitude
+FROM customer
+LEFT JOIN G
+ON G.postal_cd = customer.postal_cd
+
+/*
+> S-086: 085で作成した緯度経度つき顧客データに対し、
+会員申込店舗コード（application_store_cd）をキーに店舗データ（store）と結合せよ。
+そして申込み店舗の緯度（latitude）・経度情報（longitude)と顧客住所（address）の緯度・経度を用いて
+申込み店舗と顧客住所の距離（単位：km）を求め、
+顧客ID（customer_id）、顧客住所（address）、店舗住所（address）とともに表示せよ。
+計算式は以下の簡易式で良いものとするが、その他精度の高い方式を利用したライブラリを利用してもかまわない。
+結果は10件表示せよ。
+
+$$
+\mbox{緯度（ラジアン）}：\phi \\
+\mbox{経度（ラジアン）}：\lambda \\
+\mbox{距離}L = 6371 * \arccos(\sin \phi_1 * \sin \phi_2
++ \cos \phi_1 * \cos \phi_2 * \cos(\lambda_1 − \lambda_2))
+$$
+*/
+
+
+/*
+> S-087: 顧客データ（customer）では、異なる店舗での申込みなどにより同一顧客が複数登録されている。
+名前（customer_name）と郵便番号（postal_cd）が同じ顧客は同一顧客とみなして
+1顧客1レコードとなるように名寄せした名寄顧客データを作成し、
+顧客データの件数、名寄顧客データの件数、重複数を算出せよ。
+ただし、同一顧客に対しては売上金額合計が最も高いものを残し、
+売上金額合計が同一もしくは売上実績がない顧客については顧客ID（customer_id）の番号が小さいものを残すこととする。
+*/
+
+/*
+> S-088: 087で作成したデータを元に、顧客データに統合名寄IDを付与したデータを作成せよ。
+ただし、統合名寄IDは以下の仕様で付与するものとする。
+>
+> - 重複していない顧客：顧客ID（customer_id）を設定
+> - 重複している顧客：前設問で抽出したレコードの顧客IDを設定
+> 
+> 顧客IDのユニーク件数と、統合名寄IDのユニーク件数の差も確認すること。
+*/
+
+/*
+> S-089: 売上実績がある顧客を、予測モデル構築のため学習用データとテスト用データに分割したい。
+それぞれ8:2の割合でランダムにデータを分割せよ。
+*/
+
+/*
+> S-090: レシート明細データ（receipt）は2017年1月1日〜2019年10月31日までのデータを有している。
+売上金額（amount）を月次で集計し、学習用に12ヶ月、テスト用に6ヶ月の時系列モデル構築用データを3セット作成せよ。
+*/
+
+/*
+> S-091: 顧客データ（customer）の各顧客に対し、
+売上実績がある顧客数と売上実績がない顧客数が1:1となるようにアンダーサンプリングで抽出せよ。
+*/
+
+/*
+> S-092: 顧客データ（customer）の性別について、第三正規形へと正規化せよ。
+*/
+
+/*
+> S-093: 商品データ（product）では各カテゴリのコード値だけを保有し、カテゴリ名は保有していない。
+カテゴリデータ（category）と組み合わせて非正規化し、カテゴリ名を保有した新たな商品データを作成せよ。
+*/
+
+/*
+---
+> S-094: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |CSV（カンマ区切り）|有り|UTF-8|
+> 
+> ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
+> 
+> |出力先|
+> |:--:|
+> |/tmp/data|
+> 
+> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
+*/
+
+/*
+---
+> S-095: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |CSV（カンマ区切り）|有り|CP932|
+> 
+> PostgreSQLではShift_JISを指定することでCP932相当となる。
+ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
+> 
+> |出力先|
+> |:--:|
+> |/tmp/data|
+> 
+> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
+*/
+
+/*
+---
+> S-096: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |CSV（カンマ区切り）|無し|UTF-8|
+> 
+> ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
+> 
+> |出力先|
+> |:--:|
+> |/tmp/data|
+> 
+> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
+*/
+
+/*
+---
+> S-097: 094で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |CSV（カンマ区切り）|有り|UTF-8|
+*/
+
+/*
+---
+> S-098: 096で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |CSV（カンマ区切り）|ヘッダ無し|UTF-8|
+*/
+
+/*
+---
+> S-099: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |TSV（タブ区切り）|有り|UTF-8|
+> 
+> ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
+> 
+> |出力先|
+> |:--:|
+> |/tmp/data|
+> 
+> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
+
+*/
+
+/*
+---
+> S-100: 099で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
+> 
+> |ファイル形式|ヘッダ有無|文字エンコーディング|
+> |:--:|:--:|:--:|
+> |TSV（タブ区切り）|有り|UTF-8|
 */
