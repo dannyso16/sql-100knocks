@@ -1667,6 +1667,7 @@ ON RAll.customer_id = R19.customer_id
 経度（longitude）、緯度（latitude）の平均値を算出して使用すること。
 また、作成結果を確認するために結果を10件表示せよ。
 */
+DROP TABLE IF EXISTS #85
 WITH G AS (
 	SELECT
 		postal_cd
@@ -1679,9 +1680,12 @@ SELECT
 	customer.*
 	,G.longitude
 	,G.latitude
+INTO #85
 FROM customer
 LEFT JOIN G
 ON G.postal_cd = customer.postal_cd
+SELECT * FROM #85
+
 
 /*
 > S-086: 085で作成した緯度経度つき顧客データに対し、
@@ -1692,13 +1696,29 @@ ON G.postal_cd = customer.postal_cd
 計算式は以下の簡易式で良いものとするが、その他精度の高い方式を利用したライブラリを利用してもかまわない。
 結果は10件表示せよ。
 
-$$
-\mbox{緯度（ラジアン）}：\phi \\
-\mbox{経度（ラジアン）}：\lambda \\
-\mbox{距離}L = 6371 * \arccos(\sin \phi_1 * \sin \phi_2
-+ \cos \phi_1 * \cos \phi_2 * \cos(\lambda_1 − \lambda_2))
-$$
+ϕ:緯度（latitude）
+λ:経度（longitude)
+赤道半径：6371 KM	
+距離L=6371∗arccos(sinϕ1∗sinϕ2+cosϕ1∗cosϕ2∗cos(λ1−λ2))
+参考：https://qiita.com/port-development/items/eea3a0a225be47db0fd4
 */
+SELECT customer_id
+	,#85.address AS [顧客住所]
+	,store.address AS [店舗住所]
+	--,RADIANS(#85.longitude) AS [顧客経度(rad)]
+	--ϕ:緯度（latitude）
+	--λ:経度（longitude)
+	--赤道半径：6371 KM
+	--距離L=6371∗arccos(sinϕ1∗sinϕ2+cosϕ1∗cosϕ2∗cos(λ1−λ2))
+	,6371 * ACOS(
+		SIN(RADIANS(#85.latitude)) * SIN(RADIANS(store.latitude))
+		+ COS(RADIANS(#85.latitude)) * COS(RADIANS(store.latitude)) 
+			* COS(RADIANS(#85.longitude) - RADIANS(store.longitude))
+		) AS [顧客-店舗距離(km)]
+	,*
+FROM #85
+LEFT JOIN store WITH(NOLOCK)
+ON #85.application_store_cd = store.store_cd
 
 
 /*
@@ -1710,6 +1730,69 @@ $$
 売上金額合計が同一もしくは売上実績がない顧客については顧客ID（customer_id）の番号が小さいものを残すこととする。
 */
 
+--重複を確認
+WITH A AS (
+	SELECT 
+		customer_name
+		,postal_cd
+		,COUNT(*) AS CNT
+	FROM customer
+	GROUP BY customer_name, postal_cd
+)
+SELECT TOP 1000
+	*
+FROM customer
+LEFT JOIN A
+ON A.customer_name = customer.customer_name
+	AND A.postal_cd = customer.postal_cd
+ORDER BY A.CNT DESC, A.customer_name
+
+--名寄せデータ
+DROP TABLE IF EXISTS #87_1
+WITH S AS (
+	SELECT
+		customer_id
+		,SUM(amount) AS sum_amount
+	FROM receipt
+	GROUP BY customer_id
+)
+SELECT 
+	C.*
+	,S.sum_amount
+INTO #87_1
+FROM customer AS C
+LEFT JOIN S
+ON S.customer_id = C.customer_id
+
+select * from #87_1 --21971
+select * from customer --21971
+
+--21941
+DROP TABLE IF EXISTS #87
+SELECT
+	MIN(MAIN.customer_id) AS customer_id --sum_amountが同一の場合
+	,MAIN.customer_name
+	,MAIN.postal_cd
+	--,MAIN.sum_amount
+INTO #87
+FROM #87_1 AS MAIN
+LEFT JOIN (
+	SELECT --21941
+		customer_name
+		,postal_cd
+		,MAX(sum_amount) AS sum_amount
+	FROM #87_1
+	GROUP BY customer_name, postal_cd
+) AS MAX_SUM
+ON MAIN.customer_name = MAX_SUM.customer_name
+	AND MAIN.postal_cd = MAX_SUM.postal_cd
+	AND MAIN.sum_amount = MAX_SUM.sum_amount
+GROUP BY MAIN.customer_name
+	,MAIN.postal_cd
+	--,MAIN.sum_amount
+ORDER BY MAIN.customer_name, MAIN.postal_cd
+
+
 /*
 > S-088: 087で作成したデータを元に、顧客データに統合名寄IDを付与したデータを作成せよ。
 ただし、統合名寄IDは以下の仕様で付与するものとする。
@@ -1719,16 +1802,102 @@ $$
 > 
 > 顧客IDのユニーク件数と、統合名寄IDのユニーク件数の差も確認すること。
 */
+SELECT * FROM #87
+
+WITH CNT AS (
+	SELECT
+		customer_name
+		,postal_cd
+		,COUNT(*) AS cnt
+	FROM customer
+	GROUP BY customer_name, postal_cd
+	--ORDER BY COUNT(*) DESC
+)
+SELECT
+	CASE
+		WHEN CNT.cnt = 1 THEN C.customer_id
+		ELSE NO87.customer_id END AS customer_id
+	,CNT.cnt
+	,C.*
+FROM customer AS C
+LEFT JOIN CNT
+ON CNT.customer_name = C.customer_name
+	AND CNT.postal_cd = C.postal_cd
+LEFT JOIN #87 AS NO87
+ON NO87.customer_name = C.customer_name
+	AND NO87.postal_cd = C.postal_cd
+ORDER BY CNT.cnt DESC, C.customer_name
 
 /*
 > S-089: 売上実績がある顧客を、予測モデル構築のため学習用データとテスト用データに分割したい。
 それぞれ8:2の割合でランダムにデータを分割せよ。
 */
 
+/* パターン1: ROW_NUMBERで連番生成→分割*/
+DECLARE @sep INT
+SELECT @sep = CONVERT(INT, 0.8*COUNT(*)) FROM #87_1 WHERE sum_amount IS NOT NULL
+SELECT @sep
+
+DROP TABLE IF EXISTS #89TMP
+SELECT
+	CASE WHEN ROW_NUMBER() OVER (ORDER BY NEWID()) < @sep THEN 'TRAIN'
+	ELSE 'TEST' END AS TRAINorTEST
+	,*
+INTO #89TMP
+FROM #87_1
+WHERE sum_amount IS NOT NULL
+SELECT * FROM #89TMP
+
+--分割
+SELECT * FROM #89TMP
+WHERE TRAINorTEST = 'TRAIN'
+
+SELECT * FROM #89TMP
+WHERE TRAINorTEST = 'TEST'
+
+/*パターン２:NTILEを活用(何番目のデータで分割するか計算不要)
+ NTILE(N) でデータをN分割できる。１～Nで値が帰る*/
+DROP TABLE IF EXISTS #89TMP
+SELECT
+	CASE WHEN NTILE(10) OVER (ORDER BY NEWID()) <= 8 THEN 'TRAIN'
+	ELSE 'TEST' END AS TRAINorTEST
+	,*
+INTO #89TMP
+FROM #87_1
+WHERE sum_amount IS NOT NULL
+SELECT * FROM #89TMP
+
 /*
 > S-090: レシート明細データ（receipt）は2017年1月1日〜2019年10月31日までのデータを有している。
 売上金額（amount）を月次で集計し、学習用に12ヶ月、テスト用に6ヶ月の時系列モデル構築用データを3セット作成せよ。
 */
+--データ期間を確認
+SELECT 
+	MAX(sales_ymd) AS max_sales_ymd
+	,MIN(sales_ymd) AS min_sales_ymd
+FROM receipt
+
+--月ごとに集計
+DROP TABLE IF EXISTS #90TMP
+SELECT
+	customer_id
+	,CONVERT(INT, LEFT(sales_ymd,6)) AS sales_month
+	,SUM(amount) AS sum_amount
+INTO #90TMP
+FROM receipt
+GROUP BY customer_id, LEFT(sales_ymd,6)
+ORDER BY LEFT(sales_ymd,6)
+
+--分割
+SELECT * FROM #90TMP 
+WHERE sales_month <= 201801 --train1
+ORDER BY sales_month
+
+SELECT * FROM #90TMP 
+WHERE 201801 < sales_month AND sales_month <= 201807 --test1
+ORDER BY sales_month
+
+
 
 /*
 > S-091: 顧客データ（customer）の各顧客に対し、
