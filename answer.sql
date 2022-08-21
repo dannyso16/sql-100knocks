@@ -1903,31 +1903,120 @@ ORDER BY sales_month
 > S-091: 顧客データ（customer）の各顧客に対し、
 売上実績がある顧客数と売上実績がない顧客数が1:1となるようにアンダーサンプリングで抽出せよ。
 */
+DROP TABLE IF EXISTS #J
+SELECT 
+	CASE WHEN R.customer_id IS NOT NULL THEN '1'
+		ELSE '0' END AS [売上実績]
+	,C.*
+INTO #J
+FROM customer AS C
+LEFT JOIN (
+	SELECT DISTINCT(customer_id) AS customer_id
+	FROM receipt
+	) AS R
+ON R.customer_id = C.customer_id
+SELECT * FROM #J
+
+--実績なしの法が多い
+WITH R AS (
+	SELECT
+		*
+		,ROW_NUMBER() OVER (PARTITION BY [売上実績] ORDER BY NEWID()) AS row#
+	FROM #J
+)
+SELECT *
+FROM R
+WHERE row# <= (
+	SELECT
+		--実績あり、なしの個数が小さいほうの値を使う
+		CASE WHEN SUM(CASE WHEN [売上実績] = '1' THEN 1 ELSE 0 END) 
+			< SUM(CASE WHEN [売上実績] = '0' THEN 1 ELSE 0 END) 
+			THEN SUM(CASE WHEN [売上実績] = '1' THEN 1 ELSE 0 END)
+			ELSE SUM(CASE WHEN [売上実績] = '0' THEN 1 ELSE 0 END) END
+	FROM #J
+)
 
 /*
 > S-092: 顧客データ（customer）の性別について、第三正規形へと正規化せよ。
 */
+EXECUTE SP_HELP customer
+SELECT * FROM customer
+
+/*
+第二正規形を第三正規形にするには、主キーとなる項目以外の値によって、
+他の項目の内容が決定されないようにテーブルを分離することによって行われる。
+
+gender_cd -> gender
+*/
+DROP TABLE IF EXISTS #customer2
+SELECT
+	customer_id
+	,customer_name
+	,gender_cd
+	--,gender
+	,birth_day
+	,age
+	,postal_cd
+	,address
+	,application_store_cd
+	,application_date
+	,status_cd
+INTO #customer2
+FROM customer
+
+
+--GENDERマスタ
+DROP TABLE IF EXISTS #gender
+CREATE TABLE #gender (
+	gender_cd	NVARCHAR(2) NOT NULL PRIMARY KEY
+	,gender	NVARCHAR(7) NOT NULL
+)
+INSERT INTO #gender VALUES ('0', 'Male')
+INSERT INTO #gender VALUES ('1', 'Female')
+INSERT INTO #gender VALUES ('9', 'Unknown')
+SELECT * FROM #gender
+
+SELECT
+	*
+FROM #customer2 AS C
+LEFT JOIN #gender AS G
+ON C.gender_cd = G.gender_cd
 
 /*
 > S-093: 商品データ（product）では各カテゴリのコード値だけを保有し、カテゴリ名は保有していない。
 カテゴリデータ（category）と組み合わせて非正規化し、カテゴリ名を保有した新たな商品データを作成せよ。
 */
+SELECT * FROM product
+SELECT * FROM category
+exec sp_help category
+
+DROP TABLE IF EXISTS #93
+SELECT
+	P.product_cd
+	,P.category_major_cd
+	,C1.category_major_name
+	,P.category_medium_cd
+	,C1.category_medium_name
+	,P.category_small_cd
+	,C1.category_small_name
+	,P.unit_price
+	,P.unit_cost
+INTO #93
+FROM product AS P
+LEFT JOIN category AS C1
+ON C1.category_small_cd = P.category_small_cd
+
+SELECT * FROM #93
 
 /*
 ---
 > S-094: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |CSV（カンマ区切り）|有り|UTF-8|
 > 
 > ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
-> 
-> |出力先|
-> |:--:|
 > |/tmp/data|
-> 
-> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
 */
 
 /*
@@ -1935,17 +2024,11 @@ ORDER BY sales_month
 > S-095: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |CSV（カンマ区切り）|有り|CP932|
 > 
 > PostgreSQLではShift_JISを指定することでCP932相当となる。
 ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
-> 
-> |出力先|
-> |:--:|
 > |/tmp/data|
-> 
-> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
 */
 
 /*
@@ -1953,16 +2036,10 @@ ORDER BY sales_month
 > S-096: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |CSV（カンマ区切り）|無し|UTF-8|
 > 
 > ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
-> 
-> |出力先|
-> |:--:|
 > |/tmp/data|
-> 
-> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
 */
 
 /*
@@ -1970,7 +2047,6 @@ ORDER BY sales_month
 > S-097: 094で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |CSV（カンマ区切り）|有り|UTF-8|
 */
 
@@ -1979,7 +2055,6 @@ ORDER BY sales_month
 > S-098: 096で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |CSV（カンマ区切り）|ヘッダ無し|UTF-8|
 */
 
@@ -1988,17 +2063,12 @@ ORDER BY sales_month
 > S-099: 093で作成したカテゴリ名付き商品データを以下の仕様でファイル出力せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |TSV（タブ区切り）|有り|UTF-8|
 > 
 > ファイル出力先のパスは以下のようにすること（COPYコマンドの権限は付与済み）。
 > 
 > |出力先|
-> |:--:|
 > |/tmp/data|
-> 
-> ※"/tmp/data"を指定することでJupyterの"/work/data"と共有されるようになっている。
-
 */
 
 /*
@@ -2006,6 +2076,5 @@ ORDER BY sales_month
 > S-100: 099で作成した以下形式のファイルを読み込み、データを3件を表示させて正しく取り込まれていることを確認せよ。
 > 
 > |ファイル形式|ヘッダ有無|文字エンコーディング|
-> |:--:|:--:|:--:|
 > |TSV（タブ区切り）|有り|UTF-8|
 */
